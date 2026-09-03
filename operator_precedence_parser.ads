@@ -1,73 +1,69 @@
 package Operator_Precedence_Parser
   with Preelaborate
 is
+   pragma Warnings (Off, "-gnatw.t");
 
-   -- Domain-specific types for robust static analysis
-   type Token_Kind_Type is (Num, Add, Sub, Mul, Div, EOF);
-   type Token_Value_Type is new Long_Integer;
+   --  Custom types for strict typing
+   type Token_Kind is
+     (Tk_Number,
+      Tk_Plus,
+      Tk_Minus,
+      Tk_Multiply,
+      Tk_Divide,
+      Tk_Power,
+      Tk_Left_Paren,
+      Tk_Right_Paren,
+      Tk_End);
 
-   -- A discriminated record representing a lexical token.
-   -- Operators will only carry their kind, whereas numbers carry a value.
-   type Token_Type (Kind : Token_Kind_Type := EOF) is record
+   type Value_Type is new Integer;
+   type Precedence_Level is new Natural range 0 .. 10;
+   type Associativity_Type is (Assoc_Left, Assoc_Right, Assoc_None);
+
+   --  Token record with variant part for number values
+   type Token_Type (Kind : Token_Kind := Tk_End) is record
       case Kind is
-         when Num =>
-            Value : Token_Value_Type;
+         when Tk_Number =>
+            Value : Value_Type;
          when others =>
             null;
       end case;
    end record;
 
-   type Token_Array_Type is array (Positive range <>) of Token_Type;
+   type Token_Array is array (Positive range <>) of Token_Type;
 
-   -- Named exceptions for explicit error handling
-   Syntax_Error     : exception;
-   Evaluation_Error : exception;
-   Divide_By_Zero   : exception;
+   --  Exceptions specific to parsing and lexical analysis
+   Parse_Error : exception;
+   Lex_Error   : exception;
 
-   -- Precondition helper: Valid inputs must have at least an EOF token at the end.
-   function Is_Valid_Input (Tokens : Token_Array_Type) return Boolean is
-     (Tokens'Length > 0 and then Tokens (Tokens'Last).Kind = EOF);
+   --  Lexical analyzer: converts a string into an array of tokens
+   function Lex (Input : String) return Token_Array
+     with Global => null,
+          Post   => Lex'Result'Length >= 1 and then
+                    Lex'Result (Lex'Result'Last).Kind = Tk_End;
 
-   -----------------------------------------------------------------------------
-   -- VARIANT 1: Table-Driven Shift-Reduce Evaluator
-   -----------------------------------------------------------------------------
-   -- A classic bottom-up approach relying on an operator precedence matrix
-   -- (Yields, Takes, Accepts). It uses an operator stack and a value stack.
-   function Evaluate_Table_Driven (Tokens : Token_Array_Type) return Token_Value_Type
-     with Pre    => Is_Valid_Input (Tokens),
-          Post   => True,
-          Global => null;
+   --  Variant 1: Precedence Climbing algorithm
+   --  Recursively builds the evaluated result based on minimum precedence thresholds.
+   function Evaluate_Precedence_Climbing (Tokens : Token_Array) return Value_Type
+     with Global => null,
+          Pre    => Tokens'Length > 0 and then Tokens (Tokens'Last).Kind = Tk_End;
 
-   -----------------------------------------------------------------------------
-   -- VARIANT 2: Pratt Parser (Top-Down Operator Precedence)
-   -----------------------------------------------------------------------------
-   -- An elegant recursive descent method resolving precedence via numerical
-   -- binding powers (Left Binding Power / LBP).
-   function Evaluate_Pratt (Tokens : Token_Array_Type) return Token_Value_Type
-     with Pre    => Is_Valid_Input (Tokens),
-          Post   => True,
-          Global => null;
+   --  Variant 2: Dijkstra's Shunting-yard algorithm
+   --  Iteratively processes tokens using separate operator and operand stacks.
+   function Evaluate_Shunting_Yard (Tokens : Token_Array) return Value_Type
+     with Global => null,
+          Pre    => Tokens'Length > 0 and then Tokens (Tokens'Last).Kind = Tk_End;
 
-   -----------------------------------------------------------------------------
-   -- VARIANT 3: Dijkstra's Shunting-Yard Algorithm
-   -----------------------------------------------------------------------------
-   -- Transforms an infix token stream into a Postfix (Reverse Polish Notation)
-   -- token sequence, correctly reordering based on precedence and associativity.
-   function Infix_To_RPN (Tokens : Token_Array_Type) return Token_Array_Type
-     with Pre    => Is_Valid_Input (Tokens),
-          Post   => True,
-          Global => null;
+   --  Operator property helpers
+   function Is_Operator (Kind : Token_Kind) return Boolean
+     with Global => null;
 
-   -- Helper to evaluate a Postfix token stream directly.
-   function Evaluate_RPN (Tokens : Token_Array_Type) return Token_Value_Type
-     with Pre    => Is_Valid_Input (Tokens),
-          Post   => True,
-          Global => null;
+   function Get_Precedence (Kind : Token_Kind) return Precedence_Level
+     with Global => null,
+          Pre    => Is_Operator (Kind);
 
-   -- Helper that ties Variant 3 together: parses infix to RPN, then evaluates.
-   function Evaluate_Shunting_Yard (Tokens : Token_Array_Type) return Token_Value_Type
-     with Pre    => Is_Valid_Input (Tokens),
-          Post   => True,
-          Global => null;
+   function Get_Associativity (Kind : Token_Kind) return Associativity_Type
+     with Global => null,
+          Pre    => Is_Operator (Kind);
 
+   pragma Warnings (On, "-gnatw.t");
 end Operator_Precedence_Parser;
