@@ -16,121 +16,108 @@ procedure Tests is
       end if;
    end Check;
 
-   -- Lightweight string-to-token lexer for succinct, readable test cases.
-   function T (Input : String) return Token_Array_Type is
-      Temp  : Token_Array_Type (1 .. Input'Length + 1);
-      Count : Natural := 0;
-      Idx   : Positive := Input'First;
+   -- Helper to execute functional correctness tests via both algorithms
+   procedure Check_Eval (Label : String; Expr : String; Expected : Value_Type) is
+      Tokens : constant Token_Array := Lex (Expr);
+      PC_Res : Value_Type;
+      SY_Res : Value_Type;
    begin
-      while Idx <= Input'Last loop
-         case Input (Idx) is
-            when ' ' => Idx := Idx + 1;
-            when '+' => Count := Count + 1; Temp (Count) := (Kind => Add); Idx := Idx + 1;
-            when '-' => Count := Count + 1; Temp (Count) := (Kind => Sub); Idx := Idx + 1;
-            when '*' => Count := Count + 1; Temp (Count) := (Kind => Mul); Idx := Idx + 1;
-            when '/' => Count := Count + 1; Temp (Count) := (Kind => Div); Idx := Idx + 1;
-            when '0' .. '9' =>
-               declare
-                  Val : Token_Value_Type := 0;
-               begin
-                  while Idx <= Input'Last and then Input (Idx) in '0' .. '9' loop
-                     Val := Val * 10 + Token_Value_Type (Character'Pos (Input (Idx)) - Character'Pos ('0'));
-                     Idx := Idx + 1;
-                  end loop;
-                  Count := Count + 1;
-                  Temp (Count) := (Kind => Num, Value => Val);
-               end;
-            when others =>
-               Idx := Idx + 1;
-         end case;
-      end loop;
-      Count := Count + 1;
-      Temp (Count) := (Kind => EOF);
-      return Temp (1 .. Count);
-   end T;
+      Check (Label & " Lexed", Tokens (Tokens'Last).Kind = Tk_End);
+      PC_Res := Evaluate_Precedence_Climbing (Tokens);
+      Check (Label & " Precedence Climbing", PC_Res = Expected);
+      SY_Res := Evaluate_Shunting_Yard (Tokens);
+      Check (Label & " Shunting Yard", SY_Res = Expected);
+   exception
+      when others =>
+         Check (Label & " raised unexpected exception", False);
+         Check (Label & " Dummy Assertion", False);
+   end Check_Eval;
 
-   procedure Test_Success (Label, Input : String; Expected : Token_Value_Type) is
-      Tokens : constant Token_Array_Type := T (Input);
+   -- Helper to execute error handling logic
+   procedure Check_Parse_Error (Label : String; Expr : String) is
+      Tokens : constant Token_Array := Lex (Expr);
+      PC_Raised, SY_Raised : Boolean := False;
    begin
-      Put_Line ("TEST " & Label & " — Correctness of '" & Input & "' (Expect" & Token_Value_Type'Image(Expected) & ")");
-      Check (Label & ".1 Table_Driven", Evaluate_Table_Driven (Tokens) = Expected);
-      Check (Label & ".2 Pratt", Evaluate_Pratt (Tokens) = Expected);
-      Check (Label & ".3 Shunting_Yard", Evaluate_Shunting_Yard (Tokens) = Expected);
-   end Test_Success;
+      Check (Label & " Lexed correctly", Tokens (Tokens'Last).Kind = Tk_End);
 
-   procedure Test_Exception (Label, Input : String; Expect_Div_Zero : Boolean := False) is
-      Tokens : constant Token_Array_Type := T (Input);
-      Val    : Token_Value_Type;
-      pragma Unreferenced (Val);
-   begin
-      Put_Line ("TEST " & Label & " — Error Handling for '" & Input & "'");
-      -- 1. Table Driven
       begin
-         Val := Evaluate_Table_Driven (Tokens);
-         Check (Label & ".1 Table_Driven should have raised exception", False);
+         declare
+            Ignore1 : constant Value_Type := Evaluate_Precedence_Climbing (Tokens);
+         begin
+            null;
+         end;
       exception
-         when Divide_By_Zero => Check (Label & ".1 Table_Driven Divide_By_Zero", Expect_Div_Zero);
-         when Syntax_Error   => Check (Label & ".1 Table_Driven Syntax_Error", not Expect_Div_Zero);
-         when others         => Check (Label & ".1 Table_Driven Raised wrong exception", False);
+         when Parse_Error => PC_Raised := True;
       end;
+      Check (Label & " Precedence Climbing raised Parse_Error", PC_Raised);
 
-      -- 2. Pratt
       begin
-         Val := Evaluate_Pratt (Tokens);
-         Check (Label & ".2 Pratt should have raised exception", False);
+         declare
+            Ignore2 : constant Value_Type := Evaluate_Shunting_Yard (Tokens);
+         begin
+            null;
+         end;
       exception
-         when Divide_By_Zero => Check (Label & ".2 Pratt Divide_By_Zero", Expect_Div_Zero);
-         when Syntax_Error   => Check (Label & ".2 Pratt Syntax_Error", not Expect_Div_Zero);
-         when others         => Check (Label & ".2 Pratt Raised wrong exception", False);
+         when Parse_Error => SY_Raised := True;
       end;
-
-      -- 3. Shunting Yard
-      begin
-         Val := Evaluate_Shunting_Yard (Tokens);
-         Check (Label & ".3 Shunting_Yard should have raised exception", False);
-      exception
-         when Divide_By_Zero => Check (Label & ".3 Shunting_Yard Divide_By_Zero", Expect_Div_Zero);
-         when Syntax_Error   => Check (Label & ".3 Shunting_Yard Syntax_Error", not Expect_Div_Zero);
-         when others         => Check (Label & ".3 Shunting_Yard Raised wrong exception", False);
-      end;
-   end Test_Exception;
+      Check (Label & " Shunting Yard raised Parse_Error", SY_Raised);
+   end Check_Parse_Error;
 
 begin
-   -- CATEGORY: Functional Correctness & Operator Precedence
-   Test_Success ("1", "1 + 2", 3);
-   Test_Success ("2", "2 * 3", 6);
-   Test_Success ("3", "1 + 2 * 3", 7);
-   Test_Success ("4", "2 * 3 + 1", 7);
-
-   -- CATEGORY: Associativity Rules
-   Test_Success ("5", "10 - 4 - 2", 4);     -- Evaluates as (10 - 4) - 2
-   Test_Success ("6", "24 / 2 / 3", 4);     -- Evaluates as (24 / 2) / 3
-
-   -- CATEGORY: Mixed & Edge Cases
-   Test_Success ("7", "42", 42);            -- Single element
-   Test_Success ("8", "10 * 10 / 2 + 5", 55);
-
-   -- CATEGORY: Error Handling (Syntax Errors)
-   Test_Exception ("9",  "1 + + 2");        -- Consecutive Operators
-   Test_Exception ("10", "1 +");            -- Missing RHS operand
-   Test_Exception ("11", "* 2");            -- Missing LHS operand
-   Test_Exception ("12", "1 / 0", Expect_Div_Zero => True); -- Math Exception
-   Test_Exception ("13", "");               -- Empty Expression
-
-   -- CATEGORY: Invariants / Intermediates (Testing specific outputs of RPN translation)
-   Put_Line ("TEST 14 — RPN Translation & Intermediates");
+   Put_Line ("TEST 1 — Lexer Correctness & Edge Cases");
    declare
-      Tokens : constant Token_Array_Type := T ("1 + 2 * 3");
-      RPN    : constant Token_Array_Type := Infix_To_RPN (Tokens);
+      Tks1 : constant Token_Array := Lex ("12 + 34");
    begin
-      -- '1 + 2 * 3' -> RPN should be '1 2 3 * + EOF' (Length 6)
-      Check ("14.1 Output Array correctly sized", RPN'Length = 6);
-      Check ("14.2 High Precedence routed first", RPN (RPN'First + 3).Kind = Mul);
-      Check ("14.3 Low Precedence routed last",   RPN (RPN'First + 4).Kind = Add);
+      Check ("1.1 Proper token count", Tks1'Length = 4);
+      Check ("1.2 First token is Number", Tks1 (Tks1'First).Kind = Tk_Number);
+      Check ("1.3 Last token is End", Tks1 (Tks1'Last).Kind = Tk_End);
    end;
+
+   Put_Line ("TEST 2 — Simple Addition");
+   Check_Eval ("2.", "1 + 2", 3);
+
+   Put_Line ("TEST 3 — Simple Subtraction");
+   Check_Eval ("3.", "10 - 4", 6);
+
+   Put_Line ("TEST 4 — Multiplication and Division");
+   Check_Eval ("4.", "12 * 2 / 3", 8);
+
+   Put_Line ("TEST 5 — Exponentiation");
+   Check_Eval ("5.", "2 ^ 4", 16);
+
+   Put_Line ("TEST 6 — Precedence Rules (+ and *)");
+   Check_Eval ("6.", "2 + 3 * 4", 14);
+
+   Put_Line ("TEST 7 — Precedence Rules (^ and *)");
+   Check_Eval ("7.", "3 * 2 ^ 3", 24);
+
+   Put_Line ("TEST 8 — Left Associativity (- and /)");
+   Check_Eval ("8.", "10 - 4 - 2", 4);
+
+   Put_Line ("TEST 9 — Right Associativity (^)");
+   -- 2 ^ (3 ^ 2) = 2 ^ 9 = 512
+   Check_Eval ("9.", "2 ^ 3 ^ 2", 512);
+
+   Put_Line ("TEST 10 — Parentheses Handling");
+   Check_Eval ("10.", "(2 + 3) * 4", 20);
+
+   Put_Line ("TEST 11 — Complex Nested Expressions");
+   Check_Eval ("11.", "2 ^ 3 * 2 + 10 / (5 - 3)", 21);
+
+   Put_Line ("TEST 12 — Missing Parentheses Errors");
+   Check_Parse_Error ("12.1", "(1 + 2");
+   Check_Parse_Error ("12.2", "1 + 2)");
+
+   Put_Line ("TEST 13 — Trailing Operators and Bad Syntax");
+   Check_Parse_Error ("13.1", "1 + ");
+   Check_Parse_Error ("13.2", "* 2");
+
+   Put_Line ("TEST 14 — Arithmetic Errors");
+   Check_Parse_Error ("14.1 Div-by-zero", "10 / (2 - 2)");
+   Check_Parse_Error ("14.2 Neg Exponent", "2 ^ (0 - 1)");
 
    Put_Line ("");
    Put_Line ("=== " & Natural'Image (Pass_Count) & " passed, "
              & Natural'Image (Fail_Count) & " failed ===");
-   pragma Assert (Fail_Count = 0, "Some tests failed");
+   pragma Assert (Fail_Count = 0, "Some tests failed during execution");
 end Tests;
