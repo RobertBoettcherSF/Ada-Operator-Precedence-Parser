@@ -1,311 +1,293 @@
 package body Operator_Precedence_Parser is
 
-   -----------------------------------------------------------------------------
-   -- Shared Helper: Apply a binary operator
-   -----------------------------------------------------------------------------
-   function Apply_Operator
-     (Left, Right : Token_Value_Type;
-      Op          : Token_Kind_Type) return Token_Value_Type
-   is
+   --  Returns True if the token is a standard mathematical operator
+   function Is_Operator (Kind : Token_Kind) return Boolean is
+     (Kind in Tk_Plus | Tk_Minus | Tk_Multiply | Tk_Divide | Tk_Power);
+
+   --  Defines precedence levels (higher number = tighter binding)
+   function Get_Precedence (Kind : Token_Kind) return Precedence_Level is
+   begin
+      case Kind is
+         when Tk_Plus | Tk_Minus     => return 1;
+         when Tk_Multiply | Tk_Divide => return 2;
+         when Tk_Power               => return 3;
+         when others                 =>
+            raise Program_Error with "Not an operator";
+      end case;
+   end Get_Precedence;
+
+   --  Defines associativity rules for operators
+   function Get_Associativity (Kind : Token_Kind) return Associativity_Type is
+   begin
+      case Kind is
+         when Tk_Plus | Tk_Minus | Tk_Multiply | Tk_Divide =>
+            return Assoc_Left;
+         when Tk_Power =>
+            return Assoc_Right;
+         when others =>
+            raise Program_Error with "Not an operator";
+      end case;
+   end Get_Associativity;
+
+   --  Core mathematical evaluation
+   function Apply_Operator (Op : Token_Kind; Left, Right : Value_Type) return Value_Type is
    begin
       case Op is
-         when Add => return Left + Right;
-         when Sub => return Left - Right;
-         when Mul => return Left * Right;
-         when Div =>
+         when Tk_Plus     => return Left + Right;
+         when Tk_Minus    => return Left - Right;
+         when Tk_Multiply => return Left * Right;
+         when Tk_Divide   =>
             if Right = 0 then
-               raise Divide_By_Zero;
+               raise Parse_Error with "Division by zero";
             end if;
             return Left / Right;
-         when others =>
-            raise Evaluation_Error;
+         when Tk_Power    =>
+            if Right < 0 then
+               raise Parse_Error with "Negative exponent unsupported";
+            end if;
+            return Left ** Natural (Right);
+         when others      =>
+            raise Parse_Error with "Invalid operator execution";
       end case;
+   exception
+      when Constraint_Error =>
+         raise Parse_Error with "Mathematical overflow";
    end Apply_Operator;
 
-   -----------------------------------------------------------------------------
-   -- VARIANT 1: Table-Driven Shift-Reduce Evaluator
-   -----------------------------------------------------------------------------
-   function Evaluate_Table_Driven (Tokens : Token_Array_Type) return Token_Value_Type is
-      type Precedence_Relation is (Yields, Takes, Accepts, Err);
-      type Prec_Table_Type is array (Token_Kind_Type, Token_Kind_Type) of Precedence_Relation;
+   --  Lexical analysis implementation
+   function Lex (Input : String) return Token_Array is
+      Result : Token_Array (1 .. Input'Length + 1);
+      Count  : Natural := 0;
+      Idx    : Positive := Input'First;
 
-      -- Rows are stack Top, Columns are incoming Token. Num is handled lexically.
-      Table : constant Prec_Table_Type :=
-        (Add    => (Add => Takes, Sub => Takes, Mul => Yields, Div => Yields, EOF => Takes,   others => Err),
-         Sub    => (Add => Takes, Sub => Takes, Mul => Yields, Div => Yields, EOF => Takes,   others => Err),
-         Mul    => (Add => Takes, Sub => Takes, Mul => Takes,  Div => Takes,  EOF => Takes,   others => Err),
-         Div    => (Add => Takes, Sub => Takes, Mul => Takes,  Div => Takes,  EOF => Takes,   others => Err),
-         EOF    => (Add => Yields,Sub => Yields,Mul => Yields, Div => Yields, EOF => Accepts, others => Err),
-         others => (others => Err));
+      procedure Add (T : Token_Type) is
+      begin
+         Count := Count + 1;
+         Result (Count) := T;
+      end Add;
+   begin
+      while Idx <= Input'Last loop
+         case Input (Idx) is
+            when ' ' | ASCII.HT | ASCII.CR | ASCII.LF =>
+               Idx := Idx + 1;
+            when '+' => Add (Token_Type'(Kind => Tk_Plus));        Idx := Idx + 1;
+            when '-' => Add (Token_Type'(Kind => Tk_Minus));       Idx := Idx + 1;
+            when '*' => Add (Token_Type'(Kind => Tk_Multiply));    Idx := Idx + 1;
+            when '/' => Add (Token_Type'(Kind => Tk_Divide));      Idx := Idx + 1;
+            when '^' => Add (Token_Type'(Kind => Tk_Power));       Idx := Idx + 1;
+            when '(' => Add (Token_Type'(Kind => Tk_Left_Paren));  Idx := Idx + 1;
+            when ')' => Add (Token_Type'(Kind => Tk_Right_Paren)); Idx := Idx + 1;
+            when '0' .. '9' =>
+               declare
+                  Val : Value_Type := 0;
+               begin
+                  while Idx <= Input'Last and then Input (Idx) in '0' .. '9' loop
+                     Val := Val * 10 + Value_Type (Character'Pos (Input (Idx)) - Character'Pos ('0'));
+                     Idx := Idx + 1;
+                  end loop;
+                  Add (Token_Type'(Kind => Tk_Number, Value => Val));
+               exception
+                  when Constraint_Error =>
+                     raise Lex_Error with "Number too large";
+               end;
+            when others =>
+               raise Lex_Error with "Invalid character encountered: '" & Input (Idx) & "'";
+         end case;
+      end loop;
+      Add (Token_Type'(Kind => Tk_End));
+      return Result (1 .. Count);
+   end Lex;
 
-      -- Bounded stacks tied to input length guarantee safety without dynamic allocation
-      Val_Stack : array (1 .. Tokens'Length) of Token_Value_Type;
+   -----------------------------------------------------------------------------
+   --  Variant 1: Precedence Climbing
+   -----------------------------------------------------------------------------
+   function Evaluate_Precedence_Climbing (Tokens : Token_Array) return Value_Type is
+      Index : Positive := Tokens'First;
+
+      function Parse_Expression (Min_Prec : Precedence_Level) return Value_Type;
+      function Parse_Primary return Value_Type;
+
+      function Parse_Primary return Value_Type is
+         Result : Value_Type;
+      begin
+         if Index > Tokens'Last or else Tokens (Index).Kind = Tk_End then
+            raise Parse_Error with "Unexpected end of input in primary expression";
+         end if;
+
+         if Tokens (Index).Kind = Tk_Number then
+            Result := Tokens (Index).Value;
+            Index := Index + 1;
+            return Result;
+         elsif Tokens (Index).Kind = Tk_Left_Paren then
+            Index := Index + 1;
+            Result := Parse_Expression (0);
+            if Index > Tokens'Last or else Tokens (Index).Kind /= Tk_Right_Paren then
+               raise Parse_Error with "Missing right parenthesis";
+            end if;
+            Index := Index + 1;
+            return Result;
+         else
+            raise Parse_Error with "Unexpected token: expected number or '('";
+         end if;
+      end Parse_Primary;
+
+      function Parse_Expression (Min_Prec : Precedence_Level) return Value_Type is
+         Lhs         : Value_Type;
+         Op          : Token_Kind;
+         Prec        : Precedence_Level;
+         Assoc       : Associativity_Type;
+         Next_Min_Pr : Precedence_Level;
+         Rhs         : Value_Type;
+      begin
+         Lhs := Parse_Primary;
+
+         while Index <= Tokens'Last and then Is_Operator (Tokens (Index).Kind) loop
+            Op := Tokens (Index).Kind;
+            Prec := Get_Precedence (Op);
+
+            if Prec < Min_Prec then
+               exit;
+            end if;
+
+            Assoc := Get_Associativity (Op);
+            if Assoc = Assoc_Left then
+               Next_Min_Pr := Prec + 1;
+            else
+               Next_Min_Pr := Prec;
+            end if;
+
+            Index := Index + 1;
+            Rhs := Parse_Expression (Next_Min_Pr);
+            Lhs := Apply_Operator (Op, Lhs, Rhs);
+         end loop;
+
+         return Lhs;
+      end Parse_Expression;
+
+      Final_Result : constant Value_Type := Parse_Expression (0);
+   begin
+      if Tokens (Index).Kind /= Tk_End then
+         raise Parse_Error with "Unexpected trailing tokens";
+      end if;
+      return Final_Result;
+   end Evaluate_Precedence_Climbing;
+
+
+   -----------------------------------------------------------------------------
+   --  Variant 2: Dijkstra's Shunting-Yard
+   -----------------------------------------------------------------------------
+   function Evaluate_Shunting_Yard (Tokens : Token_Array) return Value_Type is
+      --  Internal stacks bounded safely by the maximum possible token count
+      Val_Stack : array (1 .. Tokens'Length) of Value_Type;
       Val_Top   : Natural := 0;
 
-      Op_Stack  : array (1 .. Tokens'Length + 1) of Token_Kind_Type;
+      Op_Stack  : array (1 .. Tokens'Length) of Token_Kind;
       Op_Top    : Natural := 0;
 
-      procedure Push_Val (V : Token_Value_Type) is
+      procedure Push_Val (V : Value_Type) is
       begin
          Val_Top := Val_Top + 1;
          Val_Stack (Val_Top) := V;
       end Push_Val;
 
-      function Pop_Val return Token_Value_Type is
-         V : Token_Value_Type;
+      function Pop_Val return Value_Type is
+         Result : Value_Type;
       begin
-         if Val_Top = 0 then raise Syntax_Error; end if;
-         V := Val_Stack (Val_Top);
+         if Val_Top = 0 then
+            raise Parse_Error with "Missing operand";
+         end if;
+         Result := Val_Stack (Val_Top);
          Val_Top := Val_Top - 1;
-         return V;
+         return Result;
       end Pop_Val;
 
-      procedure Push_Op (K : Token_Kind_Type) is
+      procedure Push_Op (Op : Token_Kind) is
       begin
          Op_Top := Op_Top + 1;
-         Op_Stack (Op_Top) := K;
+         Op_Stack (Op_Top) := Op;
       end Push_Op;
 
-      function Pop_Op return Token_Kind_Type is
-         K : Token_Kind_Type;
+      function Pop_Op return Token_Kind is
+         Result : Token_Kind;
       begin
-         if Op_Top = 0 then raise Syntax_Error; end if;
-         K := Op_Stack (Op_Top);
+         if Op_Top = 0 then
+            raise Parse_Error with "Mismatched parentheses or missing operator";
+         end if;
+         Result := Op_Stack (Op_Top);
          Op_Top := Op_Top - 1;
-         return K;
+         return Result;
       end Pop_Op;
 
-      Cursor         : Positive := Tokens'First;
-      Expect_Operand : Boolean := True;
-      T              : Token_Type;
-      Op             : Token_Kind_Type;
-      Left, Right    : Token_Value_Type;
-   begin
-      Push_Op (EOF);
-
-      while Cursor <= Tokens'Last loop
-         T := Tokens (Cursor);
-
-         if T.Kind = Num then
-            if not Expect_Operand then raise Syntax_Error; end if;
-            Push_Val (T.Value);
-            Expect_Operand := False;
-            Cursor := Cursor + 1;
-         else
-            -- Validate alternating syntax structurally
-            if Expect_Operand and then T.Kind /= EOF then
-               raise Syntax_Error;
-            end if;
-
-            case Table (Op_Stack (Op_Top), T.Kind) is
-               when Yields =>
-                  Push_Op (T.Kind);
-                  Expect_Operand := True;
-                  Cursor := Cursor + 1;
-
-               when Takes =>
-                  Op    := Pop_Op;
-                  Right := Pop_Val;
-                  Left  := Pop_Val;
-                  Push_Val (Apply_Operator (Left, Right, Op));
-                  -- Cursor is intentionally NOT advanced here so the table can compare
-                  -- the new stack Top against the same incoming token in the next cycle.
-
-               when Accepts =>
-                  if Val_Top = 1 and then Op_Top = 1 then
-                     return Pop_Val;
-                  else
-                     raise Syntax_Error;
-                  end if;
-
-               when Err =>
-                  raise Syntax_Error;
-            end case;
-         end if;
-      end loop;
-      raise Syntax_Error;
-   end Evaluate_Table_Driven;
-
-   -----------------------------------------------------------------------------
-   -- VARIANT 2: Pratt Parser
-   -----------------------------------------------------------------------------
-   function Evaluate_Pratt (Tokens : Token_Array_Type) return Token_Value_Type is
-      Cursor : Positive := Tokens'First;
-
-      function Peek return Token_Type is (Tokens (Cursor));
-
-      procedure Advance is
+      procedure Apply_Top_Op is
+         Op    : constant Token_Kind := Pop_Op;
+         Right : constant Value_Type := Pop_Val;
+         Left  : constant Value_Type := Pop_Val;
       begin
-         if Cursor < Tokens'Last then
-            Cursor := Cursor + 1;
-         end if;
-      end Advance;
+         Push_Val (Apply_Operator (Op, Left, Right));
+      end Apply_Top_Op;
 
-      -- LBP: Left Binding Power maps tokens to precedence tiers.
-      function LBP (Kind : Token_Kind_Type) return Natural is
-      begin
-         case Kind is
-            when Add | Sub => return 10;
-            when Mul | Div => return 20;
-            when others    => return 0;
-         end case;
-      end LBP;
-
-      function Expression (Right_Binding_Power : Natural) return Token_Value_Type is
-         Left : Token_Value_Type;
-         T    : Token_Type;
-      begin
-         -- Null Denotation (Nud): parse prefix
-         T := Peek;
-         Advance;
-         if T.Kind = Num then
-            Left := T.Value;
-         else
-            raise Syntax_Error;
-         end if;
-
-         -- Left Denotation (Led): loop while incoming operator binds tighter
-         while Right_Binding_Power < LBP (Peek.Kind) loop
-            T := Peek;
-            Advance;
-            Left := Apply_Operator (Left, Expression (LBP (T.Kind)), T.Kind);
-         end loop;
-
-         return Left;
-      end Expression;
-   begin
-      declare
-         Result : constant Token_Value_Type := Expression (0);
-      begin
-         if Peek.Kind /= EOF then
-            raise Syntax_Error;
-         end if;
-         return Result;
-      end;
-   end Evaluate_Pratt;
-
-   -----------------------------------------------------------------------------
-   -- VARIANT 3: Dijkstra's Shunting-Yard
-   -----------------------------------------------------------------------------
-   function Infix_To_RPN (Tokens : Token_Array_Type) return Token_Array_Type is
-      Output  : Token_Array_Type (Tokens'Range);
-      Out_Idx : Natural := Output'First - 1;
-
-      Op_Stack : array (1 .. Tokens'Length) of Token_Kind_Type;
-      Op_Top   : Natural := 0;
-
-      procedure Emit (T : Token_Type) is
-      begin
-         Out_Idx := Out_Idx + 1;
-         Output (Out_Idx) := T;
-      end Emit;
-
-      procedure Push (K : Token_Kind_Type) is
-      begin
-         Op_Top := Op_Top + 1;
-         Op_Stack (Op_Top) := K;
-      end Push;
-
-      function Pop return Token_Kind_Type is
-         K : constant Token_Kind_Type := Op_Stack (Op_Top);
-      begin
-         Op_Top := Op_Top - 1;
-         return K;
-      end Pop;
-
-      function Precedence (K : Token_Kind_Type) return Natural is
-      begin
-         case K is
-            when Add | Sub => return 1;
-            when Mul | Div => return 2;
-            when others    => return 0;
-         end case;
-      end Precedence;
-
-      Expect_Operand : Boolean := True;
    begin
       for I in Tokens'Range loop
          declare
-            T : constant Token_Type := Tokens (I);
+            --  Declaring Tok as a constant proves its discriminant won't change
+            --  satisfying the compiler's safety checks for variant record access.
+            Tok : constant Token_Type := Tokens (I);
          begin
-            if T.Kind = Num then
-               if not Expect_Operand then raise Syntax_Error; end if;
-               Emit (T);
-               Expect_Operand := False;
-            elsif T.Kind in Add .. Div then
-               if Expect_Operand then raise Syntax_Error; end if;
-               -- Route operators out if their precedence is >= incoming
-               while Op_Top > 0 and then Precedence (Op_Stack (Op_Top)) >= Precedence (T.Kind) loop
-                  Emit ((Kind => Pop));
-               end loop;
-               Push (T.Kind);
-               Expect_Operand := True;
-            elsif T.Kind = EOF then
-               if Expect_Operand and then Out_Idx >= Output'First then
-                  raise Syntax_Error;
-               end if;
-               -- Flush remaining operators
-               while Op_Top > 0 loop
-                  Emit ((Kind => Pop));
-               end loop;
-               Emit ((Kind => EOF));
-            end if;
+            case Tok.Kind is
+               when Tk_Number =>
+                  Push_Val (Tok.Value);
+
+               when Tk_Left_Paren =>
+                  Push_Op (Tok.Kind);
+
+               when Tk_Right_Paren =>
+                  while Op_Top > 0 and then Op_Stack (Op_Top) /= Tk_Left_Paren loop
+                     Apply_Top_Op;
+                  end loop;
+                  if Op_Top = 0 then
+                     raise Parse_Error with "Mismatched right parenthesis";
+                  end if;
+                  declare
+                     Discard : constant Token_Kind := Pop_Op;
+                  begin
+                     null; -- Safely discard the left parenthesis
+                  end;
+
+               when Tk_Plus | Tk_Minus | Tk_Multiply | Tk_Divide | Tk_Power =>
+                  declare
+                     Cur_Prec  : constant Precedence_Level   := Get_Precedence (Tok.Kind);
+                     Cur_Assoc : constant Associativity_Type := Get_Associativity (Tok.Kind);
+                     Top_Prec  : Precedence_Level;
+                  begin
+                     while Op_Top > 0 and then Op_Stack (Op_Top) /= Tk_Left_Paren loop
+                        Top_Prec := Get_Precedence (Op_Stack (Op_Top));
+                        if (Cur_Assoc = Assoc_Left and then Top_Prec >= Cur_Prec) or else
+                           (Cur_Assoc = Assoc_Right and then Top_Prec > Cur_Prec)
+                        then
+                           Apply_Top_Op;
+                        else
+                           exit;
+                        end if;
+                     end loop;
+                  end;
+                  Push_Op (Tok.Kind);
+
+               when Tk_End =>
+                  while Op_Top > 0 loop
+                     if Op_Stack (Op_Top) = Tk_Left_Paren then
+                        raise Parse_Error with "Mismatched left parenthesis";
+                     end if;
+                     Apply_Top_Op;
+                  end loop;
+            end case;
          end;
       end loop;
 
-      if Out_Idx < Output'First then
-         raise Syntax_Error;
+      if Val_Top /= 1 then
+         raise Parse_Error with "Invalid expression format";
       end if;
-      return Output (Output'First .. Out_Idx);
-   end Infix_To_RPN;
 
-   function Evaluate_RPN (Tokens : Token_Array_Type) return Token_Value_Type is
-      Val_Stack : array (1 .. Tokens'Length) of Token_Value_Type;
-      Val_Top   : Natural := 0;
-
-      procedure Push (V : Token_Value_Type) is
-      begin
-         Val_Top := Val_Top + 1;
-         Val_Stack (Val_Top) := V;
-      end Push;
-
-      function Pop return Token_Value_Type is
-         V : Token_Value_Type;
-      begin
-         if Val_Top = 0 then raise Syntax_Error; end if;
-         V := Val_Stack (Val_Top);
-         Val_Top := Val_Top - 1;
-         return V;
-      end Pop;
-   begin
-      for I in Tokens'Range loop
-         declare
-            T           : constant Token_Type := Tokens (I);
-            Left, Right : Token_Value_Type;
-         begin
-            case T.Kind is
-               when Num =>
-                  Push (T.Value);
-               when Add | Sub | Mul | Div =>
-                  Right := Pop;
-                  Left  := Pop;
-                  Push (Apply_Operator (Left, Right, T.Kind));
-               when EOF =>
-                  if Val_Top = 1 then
-                     return Pop;
-                  else
-                     raise Syntax_Error;
-                  end if;
-            end case;
-         end;
-      end loop;
-      raise Syntax_Error;
-   end Evaluate_RPN;
-
-   function Evaluate_Shunting_Yard (Tokens : Token_Array_Type) return Token_Value_Type is
-      Postfix : constant Token_Array_Type := Infix_To_RPN (Tokens);
-   begin
-      return Evaluate_RPN (Postfix);
+      return Pop_Val;
    end Evaluate_Shunting_Yard;
 
 end Operator_Precedence_Parser;
